@@ -9,10 +9,14 @@ from langchain_tavily import TavilySearch
 
 load_dotenv()
 
-search_tool = TavilySearch(
-    max_results=5,
-    topic="general",
-    search_depth="advanced"
+search_tool = (
+    TavilySearch(
+        max_results=5,
+        topic="general",
+        search_depth="advanced",
+    )
+    if os.getenv("TAVILY_API_KEY")
+    else None
 )
 
 @tool
@@ -42,13 +46,23 @@ def calculator(expression: str) -> str:
 @tool
 def get_stock_price(symbol: str) -> dict:
     """
-    Fetch latest stock price for a given symbol (e.g. 'AAPL', 'TSLA') 
+    Fetch latest stock price for a given symbol (e.g. 'AAPL', 'TSLA')
     using Alpha Vantage with API key in the URL.
     """
-    ALPHAVANTAG_API_KEY = os.getenv("ALPHAVANTAG_API_KEY")
-    url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={ALPHAVANTAG_API_KEY}"
-    r = requests.get(url)
-    return r.json()
+    api_key = os.getenv("ALPHAVANTAG_API_KEY")
+    if not api_key:
+        return {"error": "ALPHAVANTAG_API_KEY is missing. Add it to your environment."}
+
+    url = (
+        "https://www.alphavantage.co/query?function=GLOBAL_QUOTE"
+        f"&symbol={symbol}&apikey={api_key}"
+    )
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as exc:
+        return {"error": f"Could not fetch stock price: {exc}"}
 
 @tool
 def get_current_weather(location: str) -> str:
