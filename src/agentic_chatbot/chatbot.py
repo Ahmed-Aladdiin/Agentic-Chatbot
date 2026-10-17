@@ -11,7 +11,13 @@ from langgraph.graph import add_messages
 from typing import TypedDict, Annotated
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from agentic_chatbot.tools import search_tool, get_current_weather, calculator, get_stock_price
+from agentic_chatbot.tools import (
+    search_tool,
+    get_current_weather,
+    calculator,
+    get_stock_price,
+    rag_tool,
+)
 
 
 load_dotenv()
@@ -70,7 +76,11 @@ llm = ChatOpenAI(
   api_key=OPENROUTER_API_KEY,
 )
 
-tools = [tool for tool in [search_tool, get_current_weather, calculator, get_stock_price] if tool is not None]
+tools = [
+    tool
+    for tool in [search_tool, get_current_weather, calculator, get_stock_price, rag_tool]
+    if tool is not None
+]
 llm_with_tools = llm.bind_tools(tools)
 
 

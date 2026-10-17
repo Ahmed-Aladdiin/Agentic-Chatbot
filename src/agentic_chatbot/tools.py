@@ -6,8 +6,115 @@ from typing import Any
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 from langchain_tavily import TavilySearch
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_community.vectorstores import FAISS
 
 load_dotenv()
+
+ACTIVE_THREAD_ID: str | None = None
+embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-001")
+
+
+def set_active_thread(thread_id: str | None):
+    """Set the thread whose PDF knowledge base should be used."""
+    global ACTIVE_THREAD_ID
+    ACTIVE_THREAD_ID = thread_id
+
+
+def get_active_thread() -> str | None:
+    return ACTIVE_THREAD_ID
+
+
+def store_pdf(thread_id: str | None, file_path: str) -> str:
+    """Add a PDF to the FAISS store for the given thread."""
+    if not thread_id:
+        return "No active thread selected. Please choose a conversation before uploading a PDF."
+
+    store_dir = os.path.join("faiss_store", thread_id)
+    os.makedirs(store_dir, exist_ok=True)
+
+    try:
+        docs = PyPDFLoader(file_path).load()
+    except Exception as exc:
+        return f"Could not read PDF: {exc}"
+
+    if not docs:
+        return "The uploaded PDF is empty or unreadable."
+
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks = splitter.split_documents(docs)
+
+    if os.path.exists(os.path.join(store_dir, "index.faiss")):
+        vector_store = FAISS.load_local(
+            folder_path=store_dir,
+            embeddings=embeddings,
+            allow_dangerous_deserialization=True,
+        )
+        vector_store.add_documents(chunks)
+    else:
+        vector_store = FAISS.from_documents(chunks, embeddings)
+
+    vector_store.save_local(store_dir)
+    return f"Saved {len(chunks)} document chunks for thread '{thread_id}'."
+
+
+def get_retriever(thread_id: str | None = None):
+    target_thread = thread_id or get_active_thread()
+    if not target_thread:
+        raise ValueError("No active thread is selected.")
+
+    db_path = os.path.join("faiss_store", target_thread)
+    if not os.path.exists(db_path) or not os.path.exists(os.path.join(db_path, "index.faiss")):
+        raise FileNotFoundError(f"No PDF store exists for thread '{target_thread}'.")
+
+    vector_store = FAISS.load_local(
+        folder_path=db_path,
+        embeddings=embeddings,
+        allow_dangerous_deserialization=True,
+    )
+
+    return vector_store.as_retriever(
+        search_type="similarity",
+        search_kwargs={"k": 4},
+    )
+
+
+@tool
+def rag_tool(query: str) -> str:
+    """
+    Retrieve relevant information from the PDF document.
+
+    Use this tool when the user asks factual or conceptual questions
+    that may be answered using the stored PDF documents.
+
+    Args:
+        query: The question or search query used to retrieve PDF content.
+    """
+    try:
+        retriever = get_retriever()
+        documents = retriever.invoke(query)
+    except (ValueError, FileNotFoundError):
+        return "No PDF knowledge base has been uploaded for this thread yet."
+
+    if not documents:
+        return "No relevant information was found in the PDF documents for this thread."
+
+    formatted_documents = []
+
+    for index, document in enumerate(documents, start=1):
+        source = document.metadata.get("source", "Unknown source")
+        page = document.metadata.get("page", "Unknown page")
+
+        formatted_documents.append(
+            f"Document {index}\n"
+            f"Source: {source}\n"
+            f"Page: {page}\n"
+            f"Content: {document.page_content}"
+        )
+
+    return "\n\n".join(formatted_documents)
 
 search_tool = (
     TavilySearch(

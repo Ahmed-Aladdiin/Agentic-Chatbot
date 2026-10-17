@@ -1,9 +1,13 @@
 
-from agentic_chatbot.chatbot import chatbot, get_thread_IDs, extract_message_text
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-import streamlit as st
+import os
 import uuid
 import json
+
+import streamlit as st
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+
+from agentic_chatbot.chatbot import chatbot, get_thread_IDs, extract_message_text
+from agentic_chatbot.tools import set_active_thread, store_pdf
 
 
 def generate_id():
@@ -43,72 +47,86 @@ def display_value(value):
         return str(value)
 
 
-def collect_stream_response(stream, config):
+
+def collect_stream_response(stream, response_placeholder):
     response_parts = []
     tool_statuses = {}
-    tool_events = []
 
-    for update in stream:
-        # Each update contains the node that just ran and its state changes.
-        for node_name, node_update in update.items():
-            messages = node_update.get("messages", [])
+    for mode, chunk in stream:
+        # -------------------- Stream LLM tokens --------------------
+        if mode == "messages":
+            message_chunk, metadata = chunk
 
-            for message in messages:
-                # The LLM requested one or more tools.
-                if isinstance(message, AIMessage) and message.tool_calls:
-                    for call in message.tool_calls:
-                        call_id = call.get("id") or str(uuid.uuid4())
-                        tool_name = call.get("name", "Unknown tool")
-                        tool_args = call.get("args", {})
+            # Ignore non-chat nodes if they emit message chunks.
+            if metadata.get("langgraph_node") != "chat":
+                continue
 
-                        status = st.status(
-                            f"🔧 Using tool: `{tool_name}`",
-                            expanded=True,
-                        )
-                        status.write("**Input**")
-                        status.code(display_value(tool_args))
+            # Tool-call chunks generally have no response text.
+            text = extract_message_text(message_chunk)
+            if text:
+                response_parts.append(text)
+                response_placeholder.markdown(
+                    "".join(response_parts) + "▌"
+                )
 
-                        tool_statuses[call_id] = {
-                            "name": tool_name,
-                            "args": tool_args,
-                            "status": status,
-                        }
-                        tool_events.append(call_id)
+        # -------------------- Process graph updates --------------------
+        elif mode == "updates":
+            for node_name, node_update in chunk.items():
+                messages = node_update.get("messages", [])
 
-                # The tool has returned its result.
-                elif isinstance(message, ToolMessage):
-                    call_id = message.tool_call_id
-                    result = normalize_message_content(message.content)
+                for message in messages:
+                    # The LLM requested a tool.
+                    if isinstance(message, AIMessage) and message.tool_calls:
+                        for call in message.tool_calls:
+                            call_id = call.get("id") or str(uuid.uuid4())
+                            tool_name = call.get("name", "Unknown tool")
+                            tool_args = call.get("args", {})
 
-                    event = tool_statuses.get(call_id)
-
-                    if event is None:
-                        # Fallback for messages without a matching call ID.
-                        event = {
-                            "name": getattr(message, "name", "Unknown tool"),
-                            "status": st.status(
-                                "🔧 Tool result",
+                            status = st.status(
+                                f"🔧 Using tool: {tool_name}",
                                 expanded=True,
-                            ),
-                        }
-                        tool_statuses[call_id or str(uuid.uuid4())] = event
+                            )
+                            status.write("**Input**")
+                            status.code(display_value(tool_args))
 
-                    event["result"] = result
-                    event["status"].write("**Result**")
-                    event["status"].code(display_value(result))
-                    event["status"].update(
-                        label=f"✅ Tool finished: `{event['name']}`",
-                        state="complete",
-                        expanded=False,
-                    )
+                            tool_statuses[call_id] = {
+                                "name": tool_name,
+                                "status": status,
+                            }
 
-                # Collect the assistant's final response, not tool-call messages.
-                elif isinstance(message, AIMessage):
-                    text = extract_message_text(message)
-                    if text:
-                        response_parts.append(text)
+                    # The tool returned its result.
+                    elif isinstance(message, ToolMessage):
+                        call_id = message.tool_call_id
+                        result = normalize_message_content(
+                            message.content
+                        )
 
-    return "".join(response_parts)
+                        event = tool_statuses.get(call_id)
+
+                        if event is None:
+                            event = {
+                                "name": getattr(
+                                    message, "name", "Unknown tool"
+                                ),
+                                "status": st.status(
+                                    "🔧 Tool result",
+                                    expanded=True,
+                                ),
+                            }
+                            tool_statuses[call_id] = event
+
+                        event["status"].write("**Result**")
+                        event["status"].code(display_value(result))
+                        event["status"].update(
+                            label=f"✅ Tool finished: {event['name']}",
+                            state="complete",
+                            expanded=False,
+                        )
+
+    response = "".join(response_parts)
+    response_placeholder.markdown(response)
+    return response
+
 
 
 st.title("Agentic Chatbot")
@@ -128,43 +146,13 @@ if "chat_threads" not in st.session_state:
         )
     )
 
+set_active_thread(st.session_state["current_thread"])
+
 # -------------------- Chat area --------------------
 
 for message in st.session_state["chat_messages"]:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
-
-user_input = st.chat_input("Type here")
-
-if user_input:
-    st.session_state["chat_messages"].append(
-        {"role": "user", "content": user_input}
-    )
-
-    with st.chat_message("user"):
-        st.markdown(user_input)
-
-    with st.chat_message("assistant"):
-        config = {
-            "configurable": {
-                "thread_id": st.session_state["current_thread"]
-            }
-        }
-
-        response = collect_stream_response(
-            chatbot.stream(
-                {"messages": [HumanMessage(content=user_input)]},
-                config=config,
-                stream_mode="updates",
-            ),
-            config,
-        )
-
-        st.markdown(response)
-
-    st.session_state["chat_messages"].append(
-        {"role": "ai", "content": response}
-    )
 
 # -------------------- Conversation management --------------------
 
@@ -176,6 +164,7 @@ def add_new_thread(thread_id):
 def reset_chat():
     new_thread = generate_id()
     st.session_state["current_thread"] = new_thread
+    set_active_thread(new_thread)
     st.session_state["chat_messages"] = []
     add_new_thread(new_thread)
 
@@ -214,11 +203,76 @@ def convert_messages(messages):
 
 def load_thread(thread_id):
     st.session_state["current_thread"] = thread_id
+    set_active_thread(thread_id)
     st.session_state["chat_messages"] = convert_messages(
         get_thread_messages(thread_id)
     )
     st.rerun()
 
+
+# -------------------- Chat input with PDF attachment --------------------
+
+submitted = st.chat_input(
+    "Ask anything...",
+    accept_file=True,
+    file_type=["pdf"],
+)
+
+if submitted:
+    user_input = (submitted.text or "").strip()
+    uploaded_files = submitted.files
+
+    thread_id = st.session_state["current_thread"]
+    set_active_thread(thread_id)
+
+    # Process attached PDFs.
+    for uploaded_pdf in uploaded_files:
+        upload_dir = os.path.join("uploaded_pdfs", thread_id)
+        os.makedirs(upload_dir, exist_ok=True)
+
+        # Avoid allowing directory components in uploaded filenames.
+        filename = os.path.basename(uploaded_pdf.name)
+        file_path = os.path.join(upload_dir, filename)
+
+        with open(file_path, "wb") as file:
+            file.write(uploaded_pdf.getbuffer())
+
+        result = store_pdf(thread_id, file_path)
+        st.toast(f"{filename}: {result}")
+
+    # Allow attaching a PDF without asking a question.
+    if not user_input:
+        if uploaded_files:
+            st.rerun()
+    else:
+        st.session_state["chat_messages"].append(
+            {"role": "user", "content": user_input}
+        )
+
+        with st.chat_message("user"):
+            st.markdown(user_input)
+
+        with st.chat_message("assistant"):
+            config = {
+                "configurable": {
+                    "thread_id": thread_id
+                }
+            }
+
+            response_placeholder = st.empty()
+
+            response = collect_stream_response(
+                chatbot.stream(
+                    {"messages": [HumanMessage(content=user_input)]},
+                    config=config,
+                    stream_mode=["messages", "updates"],
+                ),
+                response_placeholder,
+            )
+
+        st.session_state["chat_messages"].append(
+            {"role": "ai", "content": response}
+        )
 
 # -------------------- Sidebar --------------------
 
@@ -229,5 +283,7 @@ if st.sidebar.button("New Chat"):
     st.rerun()
 
 for thread_id in st.session_state["chat_threads"][::-1]:
-    if st.sidebar.button(str(thread_id), key=thread_id):
+    msgs = get_thread_messages(thread_id)
+    first_msg = msgs[0].content if msgs else "new_chat"
+    if st.sidebar.button(str(first_msg), key=thread_id):
         load_thread(thread_id)
