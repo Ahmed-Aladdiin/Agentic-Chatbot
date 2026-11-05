@@ -133,6 +133,8 @@ st.title("Agentic Chatbot")
 
 # -------------------- Initialize session state --------------------
 
+FIRST_MSG = True
+
 if "chat_messages" not in st.session_state:
     st.session_state["chat_messages"] = []
 
@@ -142,7 +144,7 @@ if "current_thread" not in st.session_state:
 if "chat_threads" not in st.session_state:
     st.session_state["chat_threads"] = list(
         dict.fromkeys(
-            get_thread_IDs() + [st.session_state["current_thread"]]
+            get_thread_IDs()
         )
     )
 
@@ -162,6 +164,8 @@ def add_new_thread(thread_id):
 
 
 def reset_chat():
+    global FIRST_MSG
+    FIRST_MSG = True
     new_thread = generate_id()
     st.session_state["current_thread"] = new_thread
     set_active_thread(new_thread)
@@ -269,6 +273,10 @@ if submitted:
                 ),
                 response_placeholder,
             )
+
+            if FIRST_MSG: 
+                st.session_state["chat_threads"] = st.session_state["chat_threads"] + [st.session_state["current_thread"]]
+                FIRST_MSG = False
 
         st.session_state["chat_messages"].append(
             {"role": "ai", "content": response}
